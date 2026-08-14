@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "lecture-analysis",
-      "description": "강의 녹취(클로바노트 txt)·녹음 → 근거가 인용된 3층 분석 리포트. 점수·등급 없음, 오디오는 로컬 처리.",
+      "description": "강의 녹음·녹취록을 바탕으로 근거가 인용된 3층 분석 리포트를 작성합니다. 점수·등급 없이 관찰만 담고, 오디오는 로컬에서 처리합니다.",
       "source": "./",
       "category": "productivity",
       "tags": [
