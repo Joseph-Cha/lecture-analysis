@@ -1,0 +1,18 @@
+# 파이썬
+__pycache__/
+*.pyc
+.venv/
+
+# macOS
+.DS_Store
+
+# 분석 산출물(배포판 기본 출력 루트) — 사용자 데이터가 섞이므로 절대 커밋하지 않는다
+LECTURE_ANALYSIS/
+
+docs/
+
+.superpowers/
+# 배포 제외(로컬 개발 전용)
+skills/lecture-analysis/tests/
+CHANGES.md
+skills/lecture-analysis/references/review_principles.md

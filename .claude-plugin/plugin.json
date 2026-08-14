@@ -1,0 +1,22 @@
+{
+  "name": "lecture-analysis",
+  "version": "1.1.0",
+  "description": "강의 녹취(클로바노트 txt)·녹음을 분석해 근거가 인용된 3층 분석 리포트를 발행합니다 — 점수 없이, 오디오는 로컬에서.",
+  "author": {
+    "name": "Joseph Cha",
+    "url": "https://github.com/Joseph-Cha"
+  },
+  "homepage": "https://github.com/Joseph-Cha/lecture-analysis",
+  "repository": "https://github.com/Joseph-Cha/lecture-analysis",
+  "license": "Gospel",
+  "keywords": [
+    "lecture",
+    "analysis",
+    "clova-note",
+    "whisper",
+    "korean",
+    "instructor",
+    "speech-metrics",
+    "report"
+  ]
+}
