@@ -250,6 +250,27 @@ whisper 모델(`large-v3-turbo`, 약 1.5~1.6GB)은 첫 전사 때 `~/.cache/hugg
 | `LA_VENV_PY` | `<스킬>/.venv/bin/python` | s10이 쓰는 파이썬. 테스트 seam |
 | `LA_GROWTH_DIR` | (미지정) | 추세 CSV 폴더 — 아래 참고 |
 
+**설정 방법** — 변수 성격에 따라 알맞은 방법이 다릅니다:
+
+```bash
+# ① 일회성: 명령 앞에 붙이면 그 실행에만 적용 — 측정 조건을 바꾸는 변수(LA_MODEL 등)에 권장
+LA_MODEL=claude-sonnet-5 bash analyze.sh run <manifest.toml>
+
+# ② 터미널 세션 동안 유지 — 창을 닫으면 사라짐
+export LA_GROWTH_DIR=~/lecture-growth
+
+# ③ 영구: 새 터미널부터 자동 적용 — 한 위치로 고정해야 하는 LA_GROWTH_DIR에 권장
+echo 'export LA_GROWTH_DIR="$HOME/lecture-growth"' >> ~/.zshrc
+```
+
+스킬(대화)로 쓸 때는 "추세 기록도 켜서 돌려줘(폴더는 ~/lecture-growth)"처럼 말하면 ① 방식으로 실행되고, `~/.claude/settings.json`의 `env` 항목에 넣으면 Claude가 실행하는 모든 명령에 자동 적용됩니다:
+
+```json
+{ "env": { "LA_GROWTH_DIR": "/Users/<사용자>/lecture-growth" } }
+```
+
+단, 측정 조건을 바꾸는 변수(`LA_MODEL`·`LA_WHISPER_MODEL`)는 영구 설정에 넣지 않는 편이 좋습니다 — 설정해 둔 사실을 잊으면 회차 간 비교 조건이 바뀐 줄 모르고 지표를 읽게 됩니다(설정 여부는 리포트 C3에서 확인).
+
 ### 회차 추세 CSV — 개인용 opt-in (`LA_GROWTH_DIR`)
 
 회차 간 추세는 **배포판 기본 기능이 아닙니다.** `LA_GROWTH_DIR`을 지정한 실행에서만 s70이 `<LA_GROWTH_DIR>/trend_metrics.csv`에 세션 1행을 upsert하고 s80이 추세 차트를 그립니다. 미지정이면 기록도 비교도 하지 않습니다(리포트 C3에 `추세 CSV: 미기록`으로 남음).
