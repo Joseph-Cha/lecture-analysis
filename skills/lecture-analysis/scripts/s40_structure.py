@@ -3,13 +3,17 @@
 
 s30이 확립한 순서 — 입력 조립 → call_claude → 인용·ts 검증 → 증거 id 부여 → 저장 — 을 그대로
 따른다. 다른 점은 배열이 여섯 개라 검증 규칙을 표로 돌린다는 것과, 인용이 아닌 두 배열
-(timeline·coverage)에 예외 규칙이 붙는다는 것뿐이다."""
+(timeline·coverage)에 예외 규칙이 붙는다는 것뿐이다.
+
+교시 병렬(sub-agent) 구조도 s30과 같다: prepare(메인 스레드 — 가드·입력 조립) → analyze(워커 —
+call_claude 이후) → 메인이 교시 순서대로 출력. LA_PARALLEL이 동시 호출 수다."""
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from lib import llm
 from lib.clova import fmt_ts, mask_text, parse_ts
 from lib.manifest import load_manifest
-from lib.stage import cli, stage_guard_llm, write_json, read_json, run
+from lib.stage import (cli, stage_guard_llm, write_json, read_json, run,
+                       parallel_workers, map_jobs)
 
 PROMPT = pathlib.Path(__file__).resolve().parents[1] / "prompts" / "structure.md"
 REQUIRED = ["period", "questions", "uptake", "timeline", "speech_observations",
@@ -91,76 +95,89 @@ def clean_coverage(items, source, valid_ts):
             kept.append(it)
     return kept, dropped
 
+def prepare(m, per, force, plan_text):
+    """가드 + 입력 조립(메인 스레드) — 호출할 교시면 job, 아니면 None(SKIP·no_clova)."""
+    out = m.artifacts_dir / "llm" / f"{per.id}_structure.json"
+    # LLM 스테이지 전용 가드 — 직전 실행의 llm_failed 기록은 SKIP 사유가 아니다.
+    if not stage_guard_llm(out, force):
+        return None
+    src = m.artifacts_dir / "parsed" / f"{per.id}.json"
+    # 스테이지 순서가 어긋난 것뿐이므로 트레이스백이 아니라 고칠 방법을 알려준다.
+    if not src.is_file():
+        raise ValueError(f"{per.id}: artifacts/parsed/{per.id}.json 없음 — s20_parse.py를 먼저 실행하세요")
+    parsed = read_json(src)
+    blocks = parsed.get("masked_blocks")
+    if not blocks:
+        write_json(out, {"period": per.id, "skipped": "no_clova"})
+        print(f"{per.id}: 전사 없음(no_clova) → 구조 분석 건너뜀")
+        return None
+    payload = {"period": per.id,
+               "instructor_label": parsed["instructor_label"],
+               # s30과 같은 규칙 — ts를 초 정수로 보내면 모델이 인용 ts도 정수로 되돌려 준다.
+               # 출력 스키마와 하류(s70의 parse_ts(str(ts)))는 "MM:SS" 표기를 쓴다.
+               "blocks": [{"speaker": b["speaker"], "ts": fmt_ts(b["ts"]), "text": b["text"]}
+                          for b in blocks]}
+    if plan_text:
+        payload["plan_text"] = plan_text        # 없으면 키 자체를 빼 커버리지를 요구하지 않는다
+    return {"pid": per.id, "out": out, "payload": payload, "has_plan": bool(plan_text),
+            "source": "\n".join(b["text"] for b in blocks),
+            "valid_ts": {b["ts"] for b in blocks}}          # 초 — 인용 ts 실재 검증용
+
+def analyze(job):
+    """워커: call_claude → 인용·ts 검증 → 증거 id → 저장. (성공 여부, 로그 한 줄)을 돌려준다.
+
+    print는 여기서 하지 않는다 — 워커가 찍으면 교시 줄이 섞인다(map_jobs 규약: 메인이 찍는다)."""
+    pid, out, source, valid_ts = job["pid"], job["out"], job["source"], job["valid_ts"]
+    try:
+        data = llm.call_claude(PROMPT, job["payload"], validate)
+    except llm.LLMError as e:
+        write_json(out, {"period": pid, "llm_failed": str(e)})
+        return False, f"[{pid}] LLM 실패: {e}"
+    dropped, seq = 0, 1
+    for key, quote_key in QUOTE_KEYS:
+        kept, d = llm.clean(data[key], source, valid_ts, quote_key=quote_key)
+        data[key] = llm.assign_ids(kept, pid, seq)
+        seq += len(kept)
+        dropped += d
+    data["timeline"], d = clean_timeline(data["timeline"])
+    dropped += d
+    if job["has_plan"]:
+        cov, d = clean_coverage(data["coverage"], source, valid_ts)
+        data["coverage"] = llm.assign_ids(cov, pid, seq)
+    else:
+        # 계획 파일이 없으면 커버리지는 계약상 빈 배열이다(브리프·프롬프트 과업 7).
+        # 모델이 그래도 판정을 내면 무엇을 '계획'으로 삼았는지 알 수 없는 항목이므로
+        # — 인용이 진짜여도 기준이 지어낸 목차다 — 통째로 버린다(폐기 수에 계상).
+        d = len(data["coverage"])
+        data["coverage"] = []
+    dropped += d
+    # 모델이 다른 교시 id를 적어도 파일명과 어긋나지 않게 고정한다.
+    data["period"] = pid
+    # 인용 위반뿐 아니라 형식 위반으로 버린 timeline·coverage 항목까지 센다
+    # (DESIGN §7 "위반 항목 폐기 + 비고 카운트" — 리포트 A5의 측정 신뢰도 한 줄).
+    data["dropped_quotes"] = dropped
+    # 모델이 최상위에 흘린 파이프라인 예약 키를 지운다(s30·s60·s65 공통 규약).
+    # 남겨두면 성공한 교시가 실패로 재분류돼 관측이 버려지고 매 실행 재호출된다.
+    data.pop("llm_failed", None)
+    data.pop("skipped", None)
+    write_json(out, data)
+    return True, (f"{pid}: 질문 {len(data['questions'])} uptake {len(data['uptake'])} "
+                  f"타임라인 {len(data['timeline'])} 커버리지 {len(data['coverage'])} (폐기 {dropped})")
+
 def main():
     args = cli("구조 분석 (claude -p)")
     m = load_manifest(args.manifest)
-    failed = False
+    workers = parallel_workers()        # 호출 전에 읽는다 — 오타면 LLM을 한 번도 부르지 않고 exit 2
     # 계획 파일은 전사와 나란한 **두 번째 전송 경로**다(DESIGN §10.1) — 같은 마스킹을 건다.
     # 계획 문서에는 담당자·수강생 실명이 전사보다 더 자주 적혀 있어, 여기를 빼면 "외부로
     # 나가는 것은 마스킹된 텍스트뿐"이라는 불변식이 조용히 깨진다(전사만 보면 멀쩡하다).
     plan_text = mask_text(m.plan.read_text(encoding="utf-8"), m.mask_names) if m.plan else None
-    for per in m.periods:
-        out = m.artifacts_dir / "llm" / f"{per.id}_structure.json"
-        # LLM 스테이지 전용 가드 — 직전 실행의 llm_failed 기록은 SKIP 사유가 아니다.
-        if not stage_guard_llm(out, args.force):
-            continue
-        src = m.artifacts_dir / "parsed" / f"{per.id}.json"
-        # 스테이지 순서가 어긋난 것뿐이므로 트레이스백이 아니라 고칠 방법을 알려준다.
-        if not src.is_file():
-            raise ValueError(f"{per.id}: artifacts/parsed/{per.id}.json 없음 — s20_parse.py를 먼저 실행하세요")
-        parsed = read_json(src)
-        blocks = parsed.get("masked_blocks")
-        if not blocks:
-            write_json(out, {"period": per.id, "skipped": "no_clova"})
-            print(f"{per.id}: 전사 없음(no_clova) → 구조 분석 건너뜀")
-            continue
-        payload = {"period": per.id,
-                   "instructor_label": parsed["instructor_label"],
-                   # s30과 같은 규칙 — ts를 초 정수로 보내면 모델이 인용 ts도 정수로 되돌려 준다.
-                   # 출력 스키마와 하류(s70의 parse_ts(str(ts)))는 "MM:SS" 표기를 쓴다.
-                   "blocks": [{"speaker": b["speaker"], "ts": fmt_ts(b["ts"]), "text": b["text"]}
-                              for b in blocks]}
-        if plan_text:
-            payload["plan_text"] = plan_text        # 없으면 키 자체를 빼 커버리지를 요구하지 않는다
-        source = "\n".join(b["text"] for b in blocks)
-        valid_ts = {b["ts"] for b in blocks}        # 초 — 인용 ts 실재 검증용
-        try:
-            data = llm.call_claude(PROMPT, payload, validate)
-        except llm.LLMError as e:
-            print(f"[{per.id}] LLM 실패: {e}", file=sys.stderr)
-            write_json(out, {"period": per.id, "llm_failed": str(e)})
-            failed = True
-            continue
-        dropped, seq = 0, 1
-        for key, quote_key in QUOTE_KEYS:
-            kept, d = llm.clean(data[key], source, valid_ts, quote_key=quote_key)
-            data[key] = llm.assign_ids(kept, per.id, seq)
-            seq += len(kept)
-            dropped += d
-        data["timeline"], d = clean_timeline(data["timeline"])
-        dropped += d
-        if plan_text:
-            cov, d = clean_coverage(data["coverage"], source, valid_ts)
-            data["coverage"] = llm.assign_ids(cov, per.id, seq)
-        else:
-            # 계획 파일이 없으면 커버리지는 계약상 빈 배열이다(브리프·프롬프트 과업 7).
-            # 모델이 그래도 판정을 내면 무엇을 '계획'으로 삼았는지 알 수 없는 항목이므로
-            # — 인용이 진짜여도 기준이 지어낸 목차다 — 통째로 버린다(폐기 수에 계상).
-            d = len(data["coverage"])
-            data["coverage"] = []
-        dropped += d
-        # 모델이 다른 교시 id를 적어도 파일명과 어긋나지 않게 고정한다.
-        data["period"] = per.id
-        # 인용 위반뿐 아니라 형식 위반으로 버린 timeline·coverage 항목까지 센다
-        # (DESIGN §7 "위반 항목 폐기 + 비고 카운트" — 리포트 A5의 측정 신뢰도 한 줄).
-        data["dropped_quotes"] = dropped
-        # 모델이 최상위에 흘린 파이프라인 예약 키를 지운다(s30·s60·s65 공통 규약).
-        # 남겨두면 성공한 교시가 실패로 재분류돼 관측이 버려지고 매 실행 재호출된다.
-        data.pop("llm_failed", None)
-        data.pop("skipped", None)
-        write_json(out, data)
-        print(f"{per.id}: 질문 {len(data['questions'])} uptake {len(data['uptake'])} "
-              f"타임라인 {len(data['timeline'])} 커버리지 {len(data['coverage'])} (폐기 {dropped})")
+    # 가드·입력 조립을 전 교시에 대해 먼저 끝낸다 — 상류 산출물이 하나라도 없으면 호출 0회로 멈춘다.
+    jobs = [j for j in (prepare(m, per, args.force, plan_text) for per in m.periods) if j]
+    failed = False
+    for ok, msg in map_jobs(analyze, jobs, workers):
+        print(msg, file=sys.stdout if ok else sys.stderr)
+        failed |= not ok
     sys.exit(4 if failed else 0)
 
 if __name__ == "__main__":
