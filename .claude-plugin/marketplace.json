@@ -24,8 +24,8 @@
       "name": "meeting-summarize",
       "description": "회의 녹취록(화자 분리 txt)을 8항목 내부 회의록(일시·장소·참석대상·주요 안건·협의 사항·특이사항·Follow-Up·소감)으로 정리합니다. 리뷰 피드백을 규칙으로 누적해 다음 회의록에 반영합니다.",
       "source": {
-        "source": "github",
-        "repo": "Joseph-Cha/meeting-summarize"
+        "source": "url",
+        "url": "https://github.com/Joseph-Cha/meeting-summarize.git"
       },
       "category": "productivity",
       "tags": [
